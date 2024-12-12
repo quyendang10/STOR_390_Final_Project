@@ -1,0 +1,367 @@
+---
+title: "STOR 390 Final Novel Analysis"
+author: "Quyen Dang"
+date: "2024-12-12"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+# If necessary, uncomment the below line to install caret and dependent packages before running rest of this analysis.
+#install.packages("caret", dependencies=TRUE)
+#install.packages("ggplot2", dependencies=TRUE)
+```
+
+```{r}
+# If caret library isn't found, run the install above first
+library("caret")
+
+# Option to use the predefined weights in the research paper, or use the weights as I had calculated during my own analysis.
+usePaperWeights = TRUE
+
+# Option to use the predefined optimal k values in the research paper, or use the weights as I had calculate during my own analysis.
+usePaperKValues = TRUE
+```
+
+
+### 1: Load Heart Data
+
+```{r}
+# Load the heart data 
+# https://www.kaggle.com/datasets/sid321axn/heart-statlog-cleveland-hungary-final?resource=download
+data <- read.csv("heart_data.csv")
+head(data)
+```
+
+### 2: Data Preprocessing
+
+```{r}
+sum(is.na(data)) # Check for missing values in the dataset; expect 0
+
+# Identify numeric columns (excluding the target column)
+num_cols <- names(data)[sapply(data, is.numeric)] 
+num_cols <- setdiff(num_cols, "target")
+
+# Convert the target column to a factor with levels 0 and 1.
+data$target <- factor(data$target, levels=c(0,1))
+
+# Function to remove outliers using the Interquartile Range (IQR) method as described in paper
+remove_outliers <- function(x) {
+  q <- quantile(x, probs=c(0.25,0.75), na.rm=TRUE) 
+  iqr_val <- IQR(x, na.rm=TRUE)
+  low <- q[1] - 1.5*iqr_val
+  high <- q[2] + 1.5*iqr_val
+  x[x < low | x > high] <- NA # Mark values outside the bounds as NA.
+  x
+}
+
+# Create a clean copy of the dataset
+data_clean <- data
+
+# Apply the outlier removal function to each numeric column.
+for (col in num_cols) {
+  data_clean[[col]] <- remove_outliers(data_clean[[col]]) 
+}
+
+# Remove rows with NA values after outlier removal.
+data_clean <- data_clean[complete.cases(data_clean),] 
+head(data_clean)
+```
+
+### 3: Clustering Features
+
+```{r}
+# Select only numeric features for clustering
+mat <- data_clean[, num_cols, drop=FALSE]
+
+# Remove columns with zero variance to avoid issues with correlation calculations
+var_check <- sapply(mat, function(x) length(unique(x[!is.na(x)])))
+mat <- mat[, var_check > 1, drop=FALSE]
+
+# Compute the correlation matrix
+cormat <- cor(mat, use="complete.obs")
+
+# Check for NA values in the correlation matrix and remove rows/columns with NA correlations
+if(any(is.na(cormat))) {
+  good_features <- rownames(cormat)[!apply(is.na(cormat), 1, any)] 
+  mat <- mat[, good_features, drop=FALSE]
+  cormat <- cor(mat, use="complete.obs")
+}
+
+# Compute distances between features based on correlation
+dist_feats <- as.dist(1 - abs(cormat))
+
+# Reduce distances to 2D coordinates for visualization and clustering.
+coords <- cmdscale(dist_feats, k=2) 
+
+set.seed(123) # For reproducibility
+
+# Group features into num_clusters, can be modified!
+num_clusters = 8
+
+# Apply k-means clustering to group features into num_clusters
+clusters <- kmeans(coords, centers=num_clusters, nstart=10)$cluster
+
+# Create a dataframe to map features to their clusters
+feature_clusters <- data.frame(feature=colnames(mat), cluster=clusters)
+print(feature_clusters)
+
+```
+# 4: Feature Selection using Relief Approach
+
+```{r}
+# Initialize weights to 0 for each feature.
+features <- colnames(mat)
+W <- setNames(rep(0, length(features)), features)
+
+# Extract features (X) and target labels (Y)
+X <- data_clean[, features, drop=FALSE]
+Y <- data_clean$target
+m <- nrow(X)
+
+# Function to calculate absolute differences
+abs_diff <- function(a, b) abs(a-b)
+
+# Relief Algorithm (***May take a few minutes to run!!***)
+iterations <- m # Set the number of iterations to the dataset size to run through all data
+for (i in 1:iterations) {
+  idx <- i
+  
+  # Get the feature values for the sampled instance
+  R <- X[idx,] 
+  
+  # Get the class of the sampled instance
+  R_class <- Y[idx]
+
+  # Compute distances to all other instances.
+  dists <- apply(X, 1, function(rowi) sqrt(sum((rowi - R)^2)))
+  
+  # Exclude the sampled instance itself.
+  dists[idx] <- Inf
+
+  # Identify nearest neighbors of the same and different classes
+  same_class_idx <- which(Y == R_class) # Indices of same-class instances
+  diff_class_idx <- which(Y != R_class) # Indices of different-class instances.
+  same_class_idx <- same_class_idx[same_class_idx != idx] # Exclude the sampled instance
+  diff_class_idx <- diff_class_idx[diff_class_idx != idx] # Exclude the sampled instance
+
+  # Skip if neighbors are not available
+  if (length(same_class_idx)==0 || length(diff_class_idx)==0) next
+
+  # Find nearest hits (same class) and misses (different class)
+  hit_idx <- same_class_idx[which.min(dists[same_class_idx])]
+  miss_idx <- diff_class_idx[which.min(dists[diff_class_idx])]
+
+  # Update weights based on differences with nearest neighbors
+  for (f in features) {
+    W[f] <- W[f] - abs_diff(R[[f]], X[hit_idx,f])/iterations + abs_diff(R[[f]], X[miss_idx,f])/iterations
+  }
+}
+
+```
+
+```{r}
+# Select the best feature (highest weight) from each cluster
+best_features <- sapply(split(feature_clusters$feature, feature_clusters$cluster), function(group) {
+  gW <- W[group] 
+  group[which.max(gW)] 
+})
+best_features <- unname(best_features)
+
+all_features <- setdiff(colnames(data), "target")
+
+# Create an array of all features with their corresponding weights
+feature_weights <- data.frame(
+  feature = all_features,
+  weight = W[all_features] 
+)
+calculated_weights <- feature_weights$weight
+
+# Normalize and clean weight array
+calculated_weights[is.na(calculated_weights)] <- 0
+min_weight <- min(calculated_weights)
+max_weight <- max(calculated_weights)
+calculated_weights <- (calculated_weights - min_weight) / (max_weight - min_weight)
+
+# Output is array containing the calculated_weights of each column in order that we calculated
+print(calculated_weights)
+```
+
+### 5: Weighted KNN and Ten Fold Cross-Validation
+
+```{r}
+
+# Define the weighted KNN function
+weighted_knn <- function(X_train, y_train, X_test, k, weights) {
+  predict_class <- function(test_point) {
+    # Euclidean distance * weights for weighted knn
+    distances <- sqrt(rowSums((X_train - test_point) ^ 2 * weights))
+    nearest_indices <- order(distances)[1:k]
+    nearest_labels <- y_train[nearest_indices]
+    return(as.numeric(names(which.max(table(nearest_labels)))))
+  }
+  apply(X_test, 1, predict_class)
+}
+
+# Prepare the data
+set.seed(123)
+X <- as.matrix(data[, -ncol(data)])
+y <- data$target
+
+# Normalize the data before weighted KNN
+normalize <- function(x) (x - min(x)) / (max(x) - min(x))
+X <- apply(X, 2, normalize)
+
+# If we're using the weights as calculated in paper, replace our calculated weights with the correct weights as described in the paper
+if (usePaperWeights == TRUE) {
+  weights <- c(0.131, 0.121, 0.174, 0, 0.141, 0.110, 0.122, 0, 0.038, 0, 0.159)
+} else {
+  weights <- calculated_weights
+}
+print(weights)
+```
+
+
+```{r}
+# 10 Fold Cross-Validation function to find optimal k
+find_optimal_k <- function(X, y, k_values, weights = NULL, folds = 10) {
+  fold_indices <- createFolds(y, k = folds, list = TRUE)
+  avg_accuracy <- numeric(length(k_values))
+  
+  for (ki in seq_along(k_values)) {
+    k <- k_values[ki]
+    accuracy <- numeric(length(fold_indices))
+    
+    for (fold_idx in seq_along(fold_indices)) {
+      fold <- fold_indices[[fold_idx]]
+      X_train <- X[-fold, ]
+      X_test <- X[fold, ]
+      y_train <- y[-fold]
+      y_test <- y[fold]
+      
+      if (is.null(weights)) {
+        # Standard KNN
+        y_pred <- weighted_knn(X_train, y_train, X_test, k, rep(1, ncol(X)))
+      } else {
+        # Weighted KNN
+        y_pred <- weighted_knn(X_train, y_train, X_test, k, weights)
+      }
+      accuracy[fold_idx] <- mean(y_pred == y_test)
+    }
+    avg_accuracy[ki] <- mean(accuracy)
+  }
+  
+  best_k <- k_values[which.max(avg_accuracy)]
+  return(list(best_k = best_k, accuracies = avg_accuracy))
+}
+
+# Define possible k values
+k_values <- seq(1, 20, 2)
+
+# Find optimal k for standard KNN
+optimal_k_standard_calculated <- find_optimal_k(X, y, k_values)$best_k
+
+# Find optimal k for weighted KNN
+optimal_k_weighted_calculated <- find_optimal_k(X, y, k_values, weights)$best_k
+
+# If we're using the optimal k values as calculated in paper, replace our calculated k values with the optimal k values as described in the paper
+if (usePaperKValues == TRUE) {
+  optimal_k_standard = 17
+  optimal_k_weighted = 9
+} else {
+  optimal_k_standard = optimal_k_standard_calculated
+  optimal_k_weighted = optimal_k_weighted_calculated
+}
+
+print(optimal_k_standard)
+print(optimal_k_weighted)
+```
+
+### 6: Generate Results
+
+```{r}
+
+heart_data <- data
+heart_data$target <- as.factor(heart_data$target)
+
+# Normalize features again
+normalize <- function(x) (x - min(x)) / (max(x) - min(x))
+X <- as.data.frame(lapply(heart_data[, -ncol(heart_data)], normalize))
+y <- heart_data$target
+
+# Weighted KNN function (copied from before)
+weighted_knn <- function(X_train, y_train, X_test, k, weights) {
+  predict_class <- function(test_point) {
+    distances <- sqrt(rowSums((X_train - test_point)^2 * weights))
+    nearest_indices <- order(distances)[1:k]
+    nearest_labels <- y_train[nearest_indices]
+    return(as.numeric(names(which.max(table(nearest_labels)))))
+  }
+  apply(X_test, 1, predict_class)
+}
+
+# Metrics calculation function
+calculate_metrics <- function(conf_matrix) {
+  TP <- conf_matrix[2, 2]
+  TN <- conf_matrix[1, 1]
+  FP <- conf_matrix[1, 2]
+  FN <- conf_matrix[2, 1]
+  
+  # Calculate Accuracy
+  accuracy <- (TP + TN) / sum(conf_matrix)
+  
+  # Calculate metrics
+  precision <- ifelse((TP + FP) > 0, TP / (TP + FP), 0)
+  recall <- ifelse((TP + FN) > 0, TP / (TP + FN), 0)
+  f1 <- ifelse((precision + recall) > 0, 2 * precision * recall / (precision + recall), 0)
+  TPR <- ifelse((TP + FN) > 0, TP / (TP + FN), 0) # True Positive Rate
+  TNR <- ifelse((TN + FP) > 0, TN / (TN + FP), 0) # True Negative Rate
+  auc <- 0.5 * (TPR + TNR) # AU-ROC as the average of TPR and TNR
+  
+  list(
+    Accuracy = accuracy,
+    Precision = precision,
+    Recall = recall,
+    F1_Score = f1,
+    #TPR = TPR,
+    #TNR = TNR,
+    AUC = auc
+  )
+}
+
+# Split the data into training and testing sets (80/20 split)
+set.seed(123)
+train_indices <- createDataPartition(y, p = 0.8, list = FALSE)
+X_train <- X[train_indices, ]
+X_test <- X[-train_indices, ]
+y_train <- y[train_indices]
+y_test <- y[-train_indices]
+
+
+# Standard KNN (unweighted)
+standard_knn_predictions <- weighted_knn(X_train, y_train, X_test, optimal_k_standard, rep(1, ncol(X_train)))
+
+# Weighted KNN
+weighted_knn_predictions <- weighted_knn(X_train, y_train, X_test, optimal_k_weighted, weights)
+
+# Confusion matrices
+conf_matrix_standard <- table(Predicted = standard_knn_predictions, Actual = y_test)
+conf_matrix_weighted <- table(Predicted = weighted_knn_predictions, Actual = y_test)
+
+# Calculate metrics for both models
+metrics_standard <- calculate_metrics(conf_matrix_standard)
+metrics_weighted <- calculate_metrics(conf_matrix_weighted)
+
+# Output results
+cat("Confusion Matrix - Standard KNN:\n")
+print(conf_matrix_standard)
+cat("\nMetrics - Standard KNN:\n")
+print(metrics_standard)
+
+cat("\nConfusion Matrix - Weighted KNN:\n")
+print(conf_matrix_weighted)
+cat("\nMetrics - Weighted KNN:\n")
+print(metrics_weighted)
+
+```
