@@ -1,4 +1,4 @@
-# STOR 390 Final Project: Evaluating the Weighted K-Nearest Neighbor Algorithm -- Potential and Challenges in Heart Disease Prediction
+# STOR 390 Final Project: Evaluating the Weighted K-Nearest Neighbor Algorithm's Potential and Challenges in Heart Disease Prediction
 
 This README provides an overview of this repository which contains five files for the STOR 390 Final Project submission:
 - Novel Analysis (RMD and HTML): Contains R code used to conduct the novel analysis portion of this project, which is to recreate/verify the author's methodology.
